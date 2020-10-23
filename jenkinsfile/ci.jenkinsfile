@@ -1,0 +1,195 @@
+#!groovy
+
+//加载库
+@Library('jenkinslibrary@master') _
+
+//方法
+def color = new org.devops.color()
+def git = new org.devops.git()
+def sonarqube = new org.devops.sonarqube()
+def build = new org.devops.build()
+def nexus = new org.devops.nexus()
+def sonarapi = new org.devops.sonarapi()
+def gitlab = new org.devops.gitlab()
+def toemail = new org.devops.toemail()
+def docker = new org.devops.docker()
+def deploy = new org.devops.deploy()
+
+
+
+def runOpts
+
+//自动选择分支
+if ("${runOpts}" == "GitlabPush"){
+    branchName = branch - "refs/heads/"
+    
+    //增加jenkins构建信息    
+    currentBuild.description = "构建任务来自于-用户:${userName}分支:${branchName}"
+    
+    //上传提交状态到gitlab
+    gitlab.ChangeCommitStatus(projectId,commitSha,"running")
+    env.runOpts = "GitlabPush"
+
+} else {
+   userEmail = "tb13149392046@163.com"
+}
+
+pipeline {
+      agent {node { label "test"}}
+      parameters { 
+              //克隆代码参数
+              string(name: 'srcUrl', defaultValue: 'http://gitlab.k8s.com/devops/simple-java-maven-app.git', description: '代码仓库地址')
+              string(name: 'branchName', defaultValue: 'bitwiseman-patch-1', description: '代码分支')
+              string(name: 'gitlabUser', defaultValue: 'gitlab.k8s.auth', description: '拉取代码账号口令')
+              
+              //编译构建参数
+              string(name: 'buildType', defaultValue: 'mvn', description: '构建项目类型')
+              string(name: 'buildCmd', defaultValue: 'clean package', description: '构建命令')
+              string(name: 'buildPath', defaultValue: './', description: '执行编译构建的相对目录')
+              string(name: 'targetPath', defaultValue: './target', description: '生成jar/war包路径')
+              
+              //制品上传发布参数
+              string(name: 'nexusRegistry', defaultValue: 'nexus.k8s.com', description: 'nexus仓库地址')  
+              string(name: 'nexusRepositoriesName', defaultValue: 'maven-hosts', description: 'nexus存储库地址') 
+              string(name: 'nexusUser', defaultValue: 'nexus-admin-auth', description: 'nexus用户账号')
+              string(name: 'updateType', defaultValue: 'snapshot -> release', description: 'nexus制品晋级类型')
+              string(name: 'NewNexusRepositoriesName', defaultValue: 'maven-release', description: 'nexus晋级制品库地址')
+              
+              //构建镜像参数
+              string(name: 'dockerRegistryUrl', defaultValue: 'registry-29.k8s.com', description: '镜像仓库地址')
+              
+              //代码扫描参数
+              string(name: 'sonarServer', defaultValue: 'http://192.168.208.251:30090', description: 'sonarqube服务器地址')
+              string(name: 'sonarUser', defaultValue: 'sonar-admin-user', description: 'sonarqube用户账号')
+              string(name: 'sonarType', defaultValue: 'test', description: 'sonarqube类型')  
+              string(name: 'projectName', defaultValue: 'java-maven-test01', description: '项目名')
+              string(name: 'lang', defaultValue: 'java', description: 'sonraq扫描项目语言类型')              
+              string(name: 'projectDesc', defaultValue: '这是一个java代码扫描测试', description: '描述信息')
+              //string(name: 'projectPath', defaultValue: 'simple-java-maven-app/src', description: '扫描源目录')
+              string(name: 'projectPath', defaultValue: 'src', description: '扫描源目录')
+              
+              string(name: 'devloyYml', defaultValue: 'ansiblePlaybook-deploy.yml', description: '执行部署命令的yml文件')
+              }
+
+      stages{
+          stage("git"){
+             steps{
+                script{
+                    color.PrintMes("获取代码","green")
+        	        git.gitClone(params.branchName,params.gitlabUser,params.srcUrl)
+                }
+             }
+          }
+          
+          stage("build"){
+             steps{
+                script{
+                    //编译构建
+                    color.PrintMes("编译代码","green")
+                    build.Build(params.buildType,params.buildCmd)
+                    
+                    color.PrintMes("制品上传","green")
+                    //nexus.MavenUpload(params.buildPath,params.targetPath,params.nexusRegistry,params.nexusRepositoriesName)
+                    nexus.nexusUpload(params.buildPath,params.targetPath,params.nexusUser,params.nexusRegistry,params.nexusRepositoriesName)
+                    
+                    color.PrintMes("制品发布","green")
+                    println("${ArtifactUrl}")
+                    
+                    color.PrintMes("制品晋级","green")
+                    nexus.ArtifactUpdate(params.updateType,params.ArtifactUrl,params.nexusUser,params.nexusRegistry,params.nexusRepositoriesName,params.NewNexusRepositoriesName)
+                }
+             }
+          }
+          
+          
+          stage("sonra"){
+             steps{
+                script{
+                    //color.PrintMes("搜索Sonar项目是否存在","green")
+                    //sonarapi.SearchProject(params.projectName,params.sonarServer,params.sonarUser)
+                    
+                    color.PrintMes("判断项目是否存在，不存在则创建项目","green")
+                    sonarapi.CreateProject(params.projectName,params.sonarServer,params.sonarUser)
+                    
+                    color.PrintMes("配置项目质量规则","green")
+                    //需要先创建规则
+                    qpName = "${JOB_NAME}".split("-")[0]
+                    //sonarapi.ConfigQualityProfiles(params.projectName,params.lang,qpName,sonarServer,sonarUser)
+                    sonarapi.ConfigQualityProfiles(params.projectName,params.lang,"Sonar%20way",params.sonarServer,params.sonarUser)
+                    
+                     color.PrintMes("配置质量阈","green")
+                    //需要先创建质量阈
+                     qpName = "${JOB_NAME}".split("-")[0]
+                     sonarapi.ConfigQualityGates(params.projectName,qpName,params.sonarServer,params.sonarUser)
+                    
+                    
+                    color.PrintMes("代码sonarqube扫描","green")
+                    sonarapi.SonarScan(params.sonarType,params.projectName,params.projectDesc,params.projectPath)
+                    //sonarqube.SonarScan(params.sonarType,params.projectName,params.projectDesc,params.projectPath)
+                    
+                    color.PrintMes("获取sonarqube扫描结果","green")
+                    sonarapi.sonarqResult()
+                }
+             }
+          }
+          
+            /*
+            stage("docker"){
+               steps{
+               script{
+                   color.PrintMes("docker镜像构建","green")
+                   println("add_tag")
+                   sh "pwd"
+                   sh "id"
+                    docker.dockerBuild(params.dockerRegistryUrl,params.projectName,params.branchName)
+                   }
+               }
+            }
+            
+            
+            stage("deploy"){
+               steps{
+                  script{
+                      color.PrintMes("项目发布","green")
+                      deploy.AnsibleDeploy(params.devloyYml)
+               }
+               }
+            }
+            */
+      }
+      post{
+        always{
+            script{
+                println("always")
+            }
+        }
+        success{
+             script{
+                 println("success")
+                 if ("${runOpts}" == "GitlabPush"){
+                    gitlab.ChangeCommitStatus(projectId,commitSha,"success")
+                    }
+                    toemail.Email("构建成功",userEmail)
+             }
+        }
+        failure{
+             script{
+                 println("failure")
+                 if ("${runOpts}" == "GitlabPush"){
+                    gitlab.ChangeCommitStatus(projectId,commitSha,"failed")
+                 }
+                    toemail.Email("构建失败",userEmail)
+             }
+        }
+        aborted{
+             script{
+                 println("aborted")
+                 if ("${runOpts}" == "GitlabPush"){
+                 gitlab.ChangeCommitStatus(projectId,commitSha,"canceled")
+                 }
+                 toemail.Email("构建被取消了",userEmail)
+             }
+        }
+        
+      }
+}
