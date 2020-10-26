@@ -1,3 +1,19 @@
+#!groovy
+
+//加载库
+@Library('jenkinslibrary@master') _
+
+//方法
+def color = new org.devops.color()
+def git = new org.devops.git()
+def sonarqube = new org.devops.sonarqube()
+def build = new org.devops.build()
+def nexus = new org.devops.nexus()
+def sonarapi = new org.devops.sonarapi()
+def gitlab = new org.devops.gitlab()
+def toemail = new org.devops.toemail()
+def docker = new org.devops.docker()
+def deploy = new org.devops.deploy()
 def label = "slave-${UUID.randomUUID().toString()}"
 
 def helmRepo(Map args) {
