@@ -1,7 +1,7 @@
 #!groovy
 
 //加载库
-@Library('jenkinslibrary@master') _
+@Library('jenkinslibrary@main') _
 
 //方法
 def color = new org.devops.color()
