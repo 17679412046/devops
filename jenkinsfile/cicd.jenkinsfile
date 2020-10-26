@@ -1,0 +1,131 @@
+def label = "slave-${UUID.randomUUID().toString()}"
+
+def helmRepo(Map args) {
+  println "添加 templates repo"
+  sh "helm repo add  --username ${args.username} --password ${args.password} ccsoa http://192.168.208.29:180/chartrepo/ccsoa"
+  
+  println "更新 repo"
+  sh "helm repo update"
+
+  println "获取 Chart 包"
+  sh """
+    helm fetch ccsoa/ccsoa
+    tar -xzvf ccsoa-0.1.0.tgz
+    """
+}
+
+def helmDeploy(Map args) {
+    helmRepo(args)
+	
+    if (args.dry_run) {
+        println "Debug 应用"
+        sh "helm upgrade --dry-run --debug --install ${args.name} ${args.chartDir} --set service.port=${args.port}  --set fullnameOverride=${args.fullnameOverride}  --set replicaCount=${args.replicaCount} --set namespace=${args.namespace} --set env.C_OPTSvalue=${args.C_OPTS} --set env.JAR_BALL=${args.JAR_BALL} --set env.J_OPTSvalue=${args.J_OPTS} --set env.CONFIG_PATHvalue=${args.CONFIG_PATH} --set image.repository=${args.image} --set image.tag=${args.tag}"
+    } else {
+        println "部署应用"
+        sh "helm upgrade  --install ${args.name} ${args.chartDir} --set service.port=${args.port}  --set fullnameOverride=${args.fullnameOverride}  --set replicaCount=${args.replicaCount} --set namespace=${args.namespace} --set env.C_OPTSvalue=${args.C_OPTS} --set env.JAR_BALL=${args.JAR_BALL} --set env.J_OPTSvalue=${args.J_OPTS} --set env.CONFIG_PATHvalue=${args.CONFIG_PATH} --set image.repository=${args.image} --set image.tag=${args.tag}"
+        echo "应用 ${args.name} 部署成功. 可以使用 helm status ${args.name} 查看应用状态"
+    }
+}
+podTemplate(label: label, containers: [
+  containerTemplate(name: 'maven', image: 'registry-29.k8s.com/kube-ops/maven3.6.1-git:v2', command: 'cat', ttyEnabled: true),
+  containerTemplate(name: 'docker', image: 'docker', command: 'cat', ttyEnabled: true),
+  containerTemplate(name: 'kubectl', image: 'cnych/kubectl', command: 'cat', ttyEnabled: true),
+  containerTemplate(name: 'helm', image: 'cnych/helm', command: 'cat', ttyEnabled: true)
+], volumes: [
+  hostPathVolume(mountPath: '/root/.m2', hostPath: '/var/run/m2'),
+  hostPathVolume(mountPath: '/root/.kube', hostPath: '/root/.kube'),
+  hostPathVolume(mountPath: '/var/run/docker.sock', hostPath: '/var/run/docker.sock'),
+  hostPathVolume(mountPath: '/etc/localtime', hostPath: '/etc/localtime')
+]) {
+  node(label) {
+    def dockerRegistryUrl = "registry-29.k8s.com"
+    def base_image="jar:8u112"
+	def app_name="fileservice"
+	def git_repo="http://gitlab.cndatacom.com/zhsb/saas_v1.0.git"
+    def gitlab_user_ID="gitlab-limaomao1-auth"
+	def git_ver="PartyBuilding_SAAS_V1.3.0"
+	def mvn_dir="S_File"
+	def mvn_cmd="mvn clean install"
+	def target_dir="./S_File/File_Service/target"
+    def fullnameOverride="fileservice"
+    def chartDir="ccsoa"
+    def namespace="ccsoa"
+    def replicaCount="1"
+    def port="21881"
+    def C_OPTS=""
+    def JAR_BALL="app.jar"
+    def J_OPTS=""
+    def CONFIG_PATH="/opt/config/"
+	def image="${dockerRegistryUrl}/${namespace}/${app_name}"
+	def add_tag= sh(script: "date +'%Y%m%d%H%M%S'", returnStdout: true).trim()
+	def tag="${git_ver}_${add_tag}"
+    
+    stage('拉取gitlab镜像') {
+        container('maven') {
+        echo "1.拉取gitla仓库git代码"
+        sh "echo '192.168.208.247 gitlab.cndatacom.com' >>/etc/hosts"
+        sh "echo '192.168.208.249 nexus.cndatacom.com'  >>/etc/hosts"
+        checkout([$class: 'GitSCM',
+		branches: [[name: "${git_ver}"]],
+		doGenerateSubmoduleConfigurations: false,
+		extensions: [], submoduleCfg: [], 
+		userRemoteConfigs: [[credentialsId: "${gitlab_user_ID}", url : "${git_repo}"]]
+		])
+		sh "ls"
+        }
+    }
+    stage('编译打包') {
+      container('maven') {
+        echo "2.编译打包阶段"
+        sh "cd ${ mvn_dir} && ${mvn_cmd}"
+        sh "cd ${target_dir} && mkdir project_dir && mv *.jar  lib ./project_dir && rm -rf  ./project_dir/*source* && ls ./project_dir/"
+      }
+    } 
+    stage('构建 Docker 镜像') {
+      withCredentials([[$class: 'UsernamePasswordMultiBinding',
+        credentialsId: 'dockerhub',
+        usernameVariable: 'DOCKER_HUB_USER',
+        passwordVariable: 'DOCKER_HUB_PASSWORD']]) {
+          container('docker') {
+            echo "3. 构建 Docker 镜像阶段"
+			sh "echo 'Asia/Shanghai' >/etc/timezone"
+            sh "docker login ${dockerRegistryUrl} -u ${DOCKER_HUB_USER} -p ${DOCKER_HUB_PASSWORD}"
+            writeFile file: "Dockerfile", text: """FROM ${dockerRegistryUrl}/${namespace}/${base_image}
+ADD ${target_dir}/project_dir /opt/project_dir
+RUN mv /opt/project_dir/*.jar  /opt/project_dir/app.jar"""
+            sh "docker build  . -t ${image}:${tag} && docker push ${image}:${tag}"
+            }
+        }
+    }
+  
+    stage('运行 Helm') {
+      withCredentials([[$class: 'UsernamePasswordMultiBinding',
+        credentialsId: 'dockerhub',
+        usernameVariable: 'DOCKER_HUB_USER',
+        passwordVariable: 'DOCKER_HUB_PASSWORD']]) {
+          container('helm') {
+            // todo，也可以做一些其他的分支判断是否要直接部署
+            echo "4. [INFO] 开始 Helm 部署"
+            helmDeploy(
+                dry_run          :  false,
+                name             : "${app_name}",
+				fullnameOverride : "${fullnameOverride}",
+                chartDir         : "${chartDir}",
+                namespace        : "${namespace}",
+				replicaCount     : "${replicaCount}",
+				port             : "${port}",
+				C_OPTS           : "${C_OPTS}",
+				JAR_BALL         : "${JAR_BALL}",
+				J_OPTS           : "${J_OPTS}",
+				CONFIG_PATH      : "${CONFIG_PATH}",
+                tag              : "${tag}",
+                image            : "${image}",
+                username         : "${DOCKER_HUB_USER}",
+                password         : "${DOCKER_HUB_PASSWORD}"
+            )
+            echo "[INFO] Helm 部署应用成功..."
+          }
+      }
+	} 
+}
+}
